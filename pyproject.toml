@@ -1,0 +1,28 @@
+[project]
+name = "remote-executor-mcp"
+version = "1.0.0"
+description = "MCP server bridging OpenCode (or any MCP client) to remote execution environments"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "asyncssh>=2.14.0",
+]
+
+[project.scripts]
+remote-executor-mcp = "remote_executor_mcp.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
