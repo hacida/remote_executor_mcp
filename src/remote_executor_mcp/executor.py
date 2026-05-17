@@ -1,16 +1,12 @@
-"""High-level remote operations — sync, test, log, deploy, status."""
+"""High-level remote operations — sync, deploy, exec."""
 
-import asyncio
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any
 
-import asyncssh
-
-from .config import Config
-from .models import CommandResult, ServiceStatus, SyncResult
+from .config import MultiServerConfig, ServerConfig
+from .models import CommandResult, SyncResult
 from .sandbox import check_allowed, is_sensitive, sanitize_for_log
 from .transport import ConnectionPool, run_remote
 
@@ -18,31 +14,44 @@ logger = logging.getLogger(__name__)
 
 
 class RemoteExecutor:
-    """All remote operations exposed as structured tools for the MCP server."""
+    """Manages per-server connection pools and exposes remote operations."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: MultiServerConfig):
         self.config = config
-        self._pool: ConnectionPool | None = None
+        self._pools: dict[str, ConnectionPool] = {}
 
     async def start(self) -> None:
-        self._pool = ConnectionPool(self.config)
-        ok = await self._pool.health_check()
-        if not ok:
-            raise ConnectionError(
-                f"Failed health check to {self.config.remote_host} — "
-                f"check REMOTE_HOST, credentials, and network"
-            )
-        logger.info("RemoteExecutor started — pool ready")
+        """Create and health-check a pool for every configured server."""
+        for name in self.config.server_names:
+            pool = ConnectionPool(self.config.servers[name])
+            ok = await pool.health_check()
+            if not ok:
+                raise ConnectionError(
+                    f"Failed health check for server '{name}' "
+                    f"({self.config.servers[name].remote_host}) — "
+                    f"check credentials and network"
+                )
+            self._pools[name] = pool
+            logger.info("Server '%s' ready: %s@%s:%d -> %s",
+                        name,
+                        self.config.servers[name].remote_user,
+                        self.config.servers[name].remote_host,
+                        self.config.servers[name].remote_port,
+                        self.config.servers[name].remote_project_dir)
 
     async def stop(self) -> None:
-        if self._pool:
-            await self._pool.close()
+        for name, pool in self._pools.items():
+            await pool.close()
+        self._pools.clear()
 
-    @property
-    def pool(self) -> ConnectionPool:
-        if self._pool is None:
-            raise RuntimeError("RemoteExecutor not started — call start() first")
-        return self._pool
+    def _resolve_server(self, server: str | None) -> tuple[str, ServerConfig, ConnectionPool]:
+        """Return (name, ServerConfig, ConnectionPool) for the given server."""
+        name = server or self.config.default_server
+        if name not in self._pools:
+            raise ValueError(
+                f"Unknown server '{name}'. Available: {', '.join(self.config.server_names)}"
+            )
+        return name, self.config.servers[name], self._pools[name]
 
     # ── sync_and_deploy ────────────────────────────────────────────
 
@@ -52,18 +61,19 @@ class RemoteExecutor:
         deploy_script: str | None = None,
         local_dir: str | None = None,
         remote_dir: str | None = None,
+        server: str | None = None,
     ) -> dict[str, Any]:
-        """Sync local files to remote, then run deploy script."""
+        """Sync local files to remote, then optionally run deploy script."""
+        server_name, srv_config, pool = self._resolve_server(server)
         local_base = Path(local_dir or self.config.local_project_dir)
-        remote_base = remote_dir or self.config.remote_project_dir
-        deploy_cmd = deploy_script or self.config.deploy_script
+        remote_base = remote_dir or srv_config.remote_project_dir
 
         t0 = time.perf_counter()
         synced: list[str] = []
         failed: list[dict[str, str]] = []
         total_bytes = 0
 
-        conn = await self.pool.get()
+        conn = await pool.get()
         try:
             sftp = await conn.start_sftp_client()
             try:
@@ -76,36 +86,33 @@ class RemoteExecutor:
                         continue
 
                     try:
-                        # Ensure remote parent dirs exist
                         remote_parent = remote_path.rsplit("/", 1)[0]
                         await conn.run(f"mkdir -p {remote_parent}", timeout=30)
-
                         await sftp.put(str(local_path), remote_path)
                         synced.append(rel_path)
                         total_bytes += local_path.stat().st_size
-                        logger.debug("Synced %s -> %s", rel_path, remote_path)
+                        logger.debug("[%s] Synced %s -> %s", server_name, rel_path, remote_path)
                     except Exception as e:
                         failed.append({"file": rel_path, "error": str(e)})
             finally:
                 sftp.exit()
 
-            # Run deploy script (only if explicitly configured or passed)
             deploy_result = None
-            if deploy_cmd:
-                ok, reason = check_allowed(deploy_cmd)
+            if deploy_script:
+                ok, reason = check_allowed(deploy_script)
                 if not ok:
                     deploy_result = CommandResult.from_error(
                         f"Deploy command blocked: {reason}",
-                        deploy_cmd, self.config.remote_host, remote_base,
+                        deploy_script, srv_config.remote_host, remote_base,
                     )
                 else:
-                    logger.info("Deploying: %s", deploy_cmd)
+                    logger.info("[%s] Deploying: %s", server_name, deploy_script)
                     deploy_result, _ = await run_remote(
-                        self.pool, deploy_cmd,
+                        pool, deploy_script,
                         timeout=self.config.default_timeout, cwd=remote_base,
                     )
             else:
-                logger.info("No deploy_script configured — files synced, skipping deploy")
+                logger.info("[%s] No deploy_script — files synced, skipping deploy", server_name)
 
             duration_ms = (time.perf_counter() - t0) * 1000
             return SyncResult(
@@ -114,142 +121,33 @@ class RemoteExecutor:
                 duration_ms=duration_ms,
             ).to_dict()
         finally:
-            await self.pool.put(conn)
+            await pool.put(conn)
 
-    # ── run_test ────────────────────────────────────────────────────
+    # ── exec_command (generic, sandboxed) ──────────────────────────
 
-    async def run_test(self, test_command: str, timeout: int | None = None,
-                       cwd: str | None = None) -> dict[str, Any]:
-        """Execute a test command on the remote host."""
+    async def exec_command(
+        self,
+        command: str,
+        timeout: int | None = None,
+        cwd: str | None = None,
+        server: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a sandboxed command on the named remote server."""
+        server_name, srv_config, pool = self._resolve_server(server)
         timeout = timeout or self.config.default_timeout
-        cwd = cwd or self.config.remote_project_dir
-
-        ok, reason = check_allowed(test_command)
-        if not ok:
-            return CommandResult.from_error(
-                f"Test command blocked: {reason}",
-                test_command, self.config.remote_host, cwd,
-            ).to_dict()
-
-        logger.info("Running test: %s (timeout=%ds)", sanitize_for_log(test_command), timeout)
-        if is_sensitive(test_command):
-            logger.warning("Sensitive test command: %s", sanitize_for_log(test_command))
-
-        result, conn = await run_remote(self.pool, test_command, timeout=timeout, cwd=cwd)
-        if conn:
-            await self.pool.put(conn)
-        return result.to_dict()
-
-    # ── get_logs ────────────────────────────────────────────────────
-
-    async def get_logs(self, source: str, lines: int | None = None,
-                       cwd: str | None = None) -> dict[str, Any]:
-        """Fetch logs from the remote host.
-
-        source can be:
-          - "journalctl -u <service>"  (systemd journal)
-          - "docker logs <container>" (docker logs)
-          - "/var/log/app.log"        (file path — resolved to tail)
-
-        The function auto-detects the source type.
-        """
-        lines = lines or self.config.max_log_lines
-        cwd = cwd or self.config.remote_project_dir
-
-        log_cmd = _build_log_command(source, lines)
-
-        ok, reason = check_allowed(log_cmd)
-        if not ok:
-            return CommandResult.from_error(
-                f"Log command blocked: {reason}",
-                log_cmd, self.config.remote_host, cwd,
-            ).to_dict()
-
-        result, conn = await run_remote(self.pool, log_cmd, timeout=30, cwd=cwd)
-        if conn:
-            await self.pool.put(conn)
-        return result.to_dict()
-
-    # ── get_status ──────────────────────────────────────────────────
-
-    async def get_status(self, service: str) -> dict[str, Any]:
-        """Check if a service is running on the remote host.
-
-        Auto-detects systemd services vs docker containers.
-        """
-        # Try systemctl first
-        cmd = f"systemctl is-active {service} 2>/dev/null && systemctl status {service} --no-pager -l 2>/dev/null || true"
-        ok, reason = check_allowed(cmd)
-        if not ok:
-            return CommandResult.from_error(
-                f"Status check blocked: {reason}", cmd, self.config.remote_host,
-            ).to_dict()
-
-        result, conn = await run_remote(self.pool, cmd, timeout=15)
-        if conn:
-            await self.pool.put(conn)
-
-        # Parse into structured ServiceStatus
-        active = "active" in result.stdout.lower() or "running" in result.stdout.lower()
-        uptime = None
-        pid = None
-
-        # Try to extract uptime from systemctl output
-        m = re.search(r'Active:.*?since\s+(.+?)(?:;|\n)', result.stdout)
-        if m:
-            uptime = m.group(1).strip()
-        # Try to extract PID
-        m = re.search(r'Main PID:\s+(\d+)', result.stdout)
-        if m:
-            pid = int(m.group(1))
-
-        status = ServiceStatus(
-            service_name=service,
-            active=active,
-            status_text=result.stdout[:2000],
-            uptime=uptime,
-            pid=pid,
-        )
-
-        return {
-            "service": status.to_dict(),
-            "raw_exit_code": result.exit_code,
-        }
-
-    # ── exec_command (generic, restricted) ──────────────────────────
-
-    async def exec_command(self, command: str, timeout: int | None = None,
-                           cwd: str | None = None) -> dict[str, Any]:
-        """Generic remote command execution (subject to sandbox whitelist)."""
-        timeout = timeout or self.config.default_timeout
-        cwd = cwd or self.config.remote_project_dir
+        cwd = cwd or srv_config.remote_project_dir
 
         ok, reason = check_allowed(command)
         if not ok:
             return CommandResult.from_error(
-                f"Command blocked: {reason}", command, self.config.remote_host, cwd,
+                f"Command blocked: {reason}", command, srv_config.remote_host, cwd,
             ).to_dict()
 
-        logger.info("Exec: %s", sanitize_for_log(command))
+        logger.info("[%s] Exec: %s", server_name, sanitize_for_log(command))
         if is_sensitive(command):
-            logger.warning("Sensitive command executed: %s", sanitize_for_log(command))
+            logger.warning("[%s] Sensitive command: %s", server_name, sanitize_for_log(command))
 
-        result, conn = await run_remote(self.pool, command, timeout=timeout, cwd=cwd)
+        result, conn = await run_remote(pool, command, timeout=timeout, cwd=cwd)
         if conn:
-            await self.pool.put(conn)
+            await pool.put(conn)
         return result.to_dict()
-
-
-def _build_log_command(source: str, lines: int) -> str:
-    """Build the appropriate log-fetching command based on the source string."""
-    s = source.strip()
-
-    if s.startswith("journalctl"):
-        return f"{s} -n {lines} --no-pager"
-    if s.startswith("docker logs") or s.startswith("docker-compose logs"):
-        tail_flag = "--tail" if "docker-compose" not in s.split()[0] else "--tail"
-        return f"{s} {tail_flag} {lines} 2>&1"
-    if s.startswith("/") or s.startswith("./"):
-        return f"tail -n {lines} {s} 2>&1"
-    # Default: treat as a raw command with line limit
-    return f"{s} 2>&1 | tail -n {lines}"

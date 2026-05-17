@@ -4,18 +4,7 @@
     "remote-executor": {
       "type": "stdio",
       "command": "python",
-      "args": ["-m", "remote_executor_mcp"],
-      "env": {
-        "REMOTE_HOST": "192.168.1.100",
-        "REMOTE_PORT": "22",
-        "REMOTE_USER": "deploy",
-        "REMOTE_KEY_PATH": "~/.ssh/id_rsa",
-        "LOCAL_PROJECT_DIR": "/path/to/your/project",
-        "REMOTE_PROJECT_DIR": "/opt/your-app",
-        "DEFAULT_TIMEOUT": "300",
-        "MAX_LOG_LINES": "500",
-        "CONNECTION_POOL_SIZE": "3"
-      }
+      "args": ["-m", "remote_executor_mcp"]
     }
   }
 }

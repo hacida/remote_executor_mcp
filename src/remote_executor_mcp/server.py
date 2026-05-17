@@ -1,10 +1,7 @@
 """MCP Server — bridges OpenCode to remote execution environment.
 
-Provides 5 tools:
+Provides 2 tools:
   - sync_and_deploy  : upload files + run deploy script
-  - run_test         : execute tests on remote
-  - get_logs         : fetch service/container logs
-  - get_status       : check service health
   - exec_command     : generic sandboxed remote command
 """
 
@@ -12,13 +9,12 @@ import asyncio
 import json
 import logging
 import sys
-from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from .config import Config
+from .config import MultiServerConfig
 from .executor import RemoteExecutor
 
 logging.basicConfig(
@@ -61,81 +57,12 @@ TOOLS = [
                     "type": "string",
                     "description": "远端项目目录的绝对路径。不填则使用配置的默认值。",
                 },
+                "server": {
+                    "type": "string",
+                    "description": "目标服务器名称。不填则使用默认服务器。可用服务器列表见服务启动日志。",
+                },
             },
             "required": ["files"],
-        },
-    ),
-    Tool(
-        name="run_test",
-        description=(
-            "在远端服务器上执行测试命令，返回结构化测试结果（exit_code、stdout、stderr、耗时）。"
-            "支持 pytest、unittest、npm test 等任何测试命令。"
-            "当测试失败时，你必须调用 get_logs 获取更多上下文，然后再修复代码。"
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "test_command": {
-                    "type": "string",
-                    "description": "测试命令，例如 'pytest tests/test_api.py -v' 或 'npm test'。",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "超时秒数，默认 300 秒。",
-                    "default": 300,
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "远端工作目录。不填则使用配置的远端项目目录。",
-                },
-            },
-            "required": ["test_command"],
-        },
-    ),
-    Tool(
-        name="get_logs",
-        description=(
-            "从远端服务器获取服务日志。支持三种格式：\n"
-            "1. systemd journal: 'journalctl -u my-service'\n"
-            "2. Docker logs: 'docker logs my-container'\n"
-            "3. 文件路径: '/var/log/app.log'\n"
-            "日志末尾会被截断到指定的行数。"
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "日志来源。支持: journalctl -u <服务名>, docker logs <容器名>, 或 /var/log/xxx.log",
-                },
-                "lines": {
-                    "type": "integer",
-                    "description": "返回的行数，默认 500。",
-                    "default": 500,
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "远端工作目录。不填则使用配置的远端项目目录。",
-                },
-            },
-            "required": ["source"],
-        },
-    ),
-    Tool(
-        name="get_status",
-        description=(
-            "检查远端服务器上某个服务的运行状态。"
-            "自动识别 systemd 服务或 docker 容器，返回 active 状态、uptime、PID 等信息。"
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "service": {
-                    "type": "string",
-                    "description": "服务名称，例如 'nginx'、'my-app'、'docker-nginx'。",
-                },
-            },
-            "required": ["service"],
         },
     ),
     Tool(
@@ -160,6 +87,10 @@ TOOLS = [
                 "cwd": {
                     "type": "string",
                     "description": "远端工作目录。",
+                },
+                "server": {
+                    "type": "string",
+                    "description": "目标服务器名称。不填则使用默认服务器。",
                 },
             },
             "required": ["command"],
@@ -198,28 +129,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     deploy_script=arguments.get("deploy_script"),
                     local_dir=arguments.get("local_dir"),
                     remote_dir=arguments.get("remote_dir"),
-                )
-            case "run_test":
-                result = await executor.run_test(
-                    test_command=arguments["test_command"],
-                    timeout=arguments.get("timeout"),
-                    cwd=arguments.get("cwd"),
-                )
-            case "get_logs":
-                result = await executor.get_logs(
-                    source=arguments["source"],
-                    lines=arguments.get("lines"),
-                    cwd=arguments.get("cwd"),
-                )
-            case "get_status":
-                result = await executor.get_status(
-                    service=arguments["service"],
+                    server=arguments.get("server"),
                 )
             case "exec_command":
                 result = await executor.exec_command(
                     command=arguments["command"],
                     timeout=arguments.get("timeout"),
                     cwd=arguments.get("cwd"),
+                    server=arguments.get("server"),
                 )
             case _:
                 return [TextContent(type="text", text=json.dumps({
@@ -241,20 +158,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 # ── Entry point ─────────────────────────────────────────────────────
 
 async def main() -> None:
-    config = Config()
+    config = MultiServerConfig.from_env()
 
     errors = config.validate()
     if errors:
         for err in errors:
             logger.error("Config error: %s", err)
-        logger.error("Fix the errors above and restart. Required env vars: "
-                     "REMOTE_HOST, REMOTE_USER, REMOTE_KEY_PATH (or REMOTE_PASSWORD)")
+        logger.error("Fix the errors above and restart.")
+        logger.error("Create a remote-executor.yaml config file in your project root, "
+                     "or set REMOTE_EXECUTOR_CONFIG to point to one.")
         sys.exit(1)
 
     logger.info("Starting remote-executor MCP server")
-    logger.info("Remote: %s@%s:%d -> %s",
-                config.remote_user, config.remote_host, config.remote_port,
-                config.remote_project_dir)
+    logger.info("Servers: %s", ", ".join(config.server_names))
+    for name, srv in config.servers.items():
+        logger.info("  [%s] %s@%s:%d -> %s",
+                    name, srv.remote_user, srv.remote_host,
+                    srv.remote_port, srv.remote_project_dir)
     logger.info("Local project: %s", config.local_project_dir)
 
     global _executor

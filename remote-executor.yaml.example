@@ -1,0 +1,43 @@
+# Multi-server configuration for remote-executor-mcp
+# Copy to remote-executor.yaml in your project root and edit.
+
+local_project_dir: /path/to/your/project
+default_timeout: 300
+
+servers:
+  # ── SSH key auth ──
+  prod:
+    host: 10.0.0.1
+    port: 22
+    user: deploy
+    key_path: ~/.ssh/id_rsa
+    project_dir: /opt/myapp
+    # connection_pool_size: 3  # optional, default 3
+
+  # ── Password auth (no SSH key) ──
+  staging:
+    host: 10.0.0.2
+    port: 22
+    user: deploy
+    password: your_password
+    project_dir: /opt/staging
+
+  # ── Key auth + sudo to root (passwordless) ──
+  prod-root:
+    host: 10.0.0.1
+    port: 22
+    user: deploy
+    key_path: ~/.ssh/id_rsa
+    become_user: root
+    project_dir: /opt/myapp
+
+  # ── Password auth + sudo with password ──
+  # SSH as deploy with password, then sudo to root with another password
+  prod-full:
+    host: 10.0.0.1
+    port: 22
+    user: deploy
+    password: your_ssh_password
+    become_user: root
+    become_password: your_sudo_password
+    project_dir: /opt/myapp

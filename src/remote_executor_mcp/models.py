@@ -77,15 +77,3 @@ class SyncResult:
         if self.deploy_result:
             d["deploy_result"] = self.deploy_result.to_dict()
         return d
-
-
-@dataclass
-class ServiceStatus:
-    service_name: str
-    active: bool
-    status_text: str
-    uptime: str | None = None
-    pid: int | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)

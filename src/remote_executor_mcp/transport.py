@@ -2,13 +2,14 @@
 
 import asyncio
 import logging
+import shlex
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncssh
 
-from .config import Config
+from .config import ServerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 class ConnectionPool:
     """A small pool of reusable SSH connections."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: ServerConfig):
         self.config = config
         self._connections: list[asyncssh.SSHClientConnection] = []
         self._lock = asyncio.Lock()
@@ -35,7 +36,7 @@ class ConnectionPool:
             connect_kwargs["password"] = self.config.remote_password
         else:
             raise ValueError("No authentication method configured. "
-                             "Set REMOTE_KEY_PATH or REMOTE_PASSWORD.")
+                             "Set key_path or password in remote-executor.yaml.")
 
         try:
             conn = await asyncio.wait_for(
@@ -129,6 +130,11 @@ async def run_remote(
     from .models import CommandResult
 
     full_cmd = f"cd {cwd} && {command}" if cwd else command
+    if pool.config.remote_become_user:
+        become_cmd = f"sudo -u {pool.config.remote_become_user} -- sh -c {shlex.quote(full_cmd)}"
+        if pool.config.remote_become_password:
+            become_cmd = f"echo {shlex.quote(pool.config.remote_become_password)} | sudo -S -u {pool.config.remote_become_user} -- sh -c {shlex.quote(full_cmd)}"
+        full_cmd = become_cmd
     t0 = time.perf_counter()
 
     conn: asyncssh.SSHClientConnection | None = None
