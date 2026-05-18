@@ -1,4 +1,4 @@
-"""MCP Server — bridges OpenCode to remote execution environment.
+"""MCP Server — bridges an MCP client to a remote execution environment.
 
 Provides 2 tools:
   - sync_and_deploy  : upload files + run deploy script

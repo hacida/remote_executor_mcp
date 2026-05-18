@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `remote-executor-mcp` is an MCP (Model Context Protocol) server that bridges a local AI agent to a remote Linux server via SSH. It provides 2 tools: `sync_and_deploy` (SFTP upload + optional deploy script) and `exec_command` (sandboxed remote command execution). Together they enable a **modify → deploy → test → fix** closed loop.
 
-Package layout: `src/remote_executor_mcp/` (source), `tests/` (tests).
+The server works with any MCP client (Claude Code, OpenCode, etc.).
+
+Package layout: `src/remote_executor_mcp/` (source).
 
 ## Commands
 
@@ -14,18 +16,22 @@ Package layout: `src/remote_executor_mcp/` (source), `tests/` (tests).
 # Install in editable mode
 pip install -e .
 
-# Run the MCP server (as a child process of an MCP client like OpenCode)
+# Run the MCP server (as a child process of an MCP client)
 python -m remote_executor_mcp
 
-# Run tests
+# Run tests (when test suite exists)
 pytest tests/ -v
 ```
 
-Tests use `pytest-asyncio` with `asyncio_mode = "auto"` (configured in `pyproject.toml`).
+## AI Skill
+
+The project includes an AI skill at `opencode/skills/remote-dev/SKILL.md` that defines the complete remote development workflow:
+local coding → sync → deploy → test → diagnose → fix loop. It covers auto-discovery of
+remote services/logs/params, memory-driven configuration, and test generation cycles.
 
 ## Architecture
 
-The server is launched as a child process by an MCP client (e.g. OpenCode) and communicates over stdio via the `mcp` library.
+The server is launched as a child process by an MCP client and communicates over stdio via the `mcp` library.
 
 **Startup flow** (`__main__.py` → `server.main()`):
 1. `MultiServerConfig.from_env()` loads `remote-executor.yaml` (or the path in `REMOTE_EXECUTOR_CONFIG` env var).

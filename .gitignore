@@ -1,3 +1,33 @@
+# Claude Code
 .claude
 
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Project-specific (user configs, credentials)
+remote-executor.yaml
+opencode.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
