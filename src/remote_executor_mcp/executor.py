@@ -53,19 +53,18 @@ class RemoteExecutor:
             )
         return name, self.config.servers[name], self._pools[name]
 
-    # ── sync_and_deploy ────────────────────────────────────────────
+    # ── sync ──────────────────────────────────────────────────────
 
-    async def sync_and_deploy(
+    async def sync(
         self,
         files: list[str],
-        deploy_script: str | None = None,
         local_dir: str | None = None,
         remote_dir: str | None = None,
         server: str | None = None,
     ) -> dict[str, Any]:
-        """Sync local files to remote, then optionally run deploy script."""
+        """Sync local files to remote server. All file paths must be absolute."""
         server_name, srv_config, pool = self._resolve_server(server)
-        local_base = Path(local_dir or self.config.local_project_dir)
+        local_base = Path(local_dir or self.config.local_project_dir).resolve()
         remote_base = remote_dir or srv_config.remote_project_dir
 
         t0 = time.perf_counter()
@@ -77,48 +76,41 @@ class RemoteExecutor:
         try:
             sftp = await conn.start_sftp_client()
             try:
-                for rel_path in files:
-                    local_path = local_base / rel_path
+                for file_path in files:
+                    local_path = Path(file_path)
+
+                    if not local_path.is_absolute():
+                        failed.append({"file": file_path, "error": f"Path must be absolute, got: {file_path}"})
+                        continue
+
+                    try:
+                        rel_path = local_path.resolve().relative_to(local_base)
+                    except ValueError:
+                        failed.append({"file": file_path, "error": f"File not under local project dir ({local_base}): {file_path}"})
+                        continue
+
                     remote_path = f"{remote_base}/{rel_path}"
 
                     if not local_path.exists():
-                        failed.append({"file": rel_path, "error": f"Local file not found: {local_path}"})
+                        failed.append({"file": file_path, "error": f"Local file not found: {local_path}"})
                         continue
 
                     try:
                         remote_parent = remote_path.rsplit("/", 1)[0]
                         await conn.run(f"mkdir -p {remote_parent}", timeout=30)
                         await sftp.put(str(local_path), remote_path)
-                        synced.append(rel_path)
+                        synced.append(file_path)
                         total_bytes += local_path.stat().st_size
                         logger.debug("[%s] Synced %s -> %s", server_name, rel_path, remote_path)
                     except Exception as e:
-                        failed.append({"file": rel_path, "error": str(e)})
+                        failed.append({"file": file_path, "error": str(e)})
             finally:
                 sftp.exit()
-
-            deploy_result = None
-            if deploy_script:
-                ok, reason = check_allowed(deploy_script)
-                if not ok:
-                    deploy_result = CommandResult.from_error(
-                        f"Deploy command blocked: {reason}",
-                        deploy_script, srv_config.remote_host, remote_base,
-                    )
-                else:
-                    logger.info("[%s] Deploying: %s", server_name, deploy_script)
-                    deploy_result, _ = await run_remote(
-                        pool, deploy_script,
-                        timeout=self.config.default_timeout, cwd=remote_base,
-                    )
-            else:
-                logger.info("[%s] No deploy_script — files synced, skipping deploy", server_name)
 
             duration_ms = (time.perf_counter() - t0) * 1000
             return SyncResult(
                 files_synced=synced, files_failed=failed,
-                deploy_result=deploy_result, total_bytes=total_bytes,
-                duration_ms=duration_ms,
+                total_bytes=total_bytes, duration_ms=duration_ms,
             ).to_dict()
         finally:
             await pool.put(conn)

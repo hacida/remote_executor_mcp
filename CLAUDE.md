@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-`remote-executor-mcp` is an MCP (Model Context Protocol) server that bridges a local AI agent to a remote Linux server via SSH. It provides 2 tools: `sync_and_deploy` (SFTP upload + optional deploy script) and `exec_command` (sandboxed remote command execution). Together they enable a **modify → deploy → test → fix** closed loop.
+`remote-executor-mcp` is an MCP (Model Context Protocol) server that bridges a local AI agent to a remote Linux server via SSH. It provides 2 tools: `sync` (SFTP upload) and `exec_command` (sandboxed remote command execution). Together they enable a **modify → deploy → test → fix** closed loop.
 
 The server works with any MCP client (Claude Code, OpenCode, etc.).
 
@@ -39,7 +39,7 @@ The server is launched as a child process by an MCP client and communicates over
 3. `RemoteExecutor.start()` creates a `ConnectionPool` per server and runs a health check on each. Fails fast if any remote is unreachable.
 4. `stdio_server()` opens read/write streams and the `mcp.Server` handles the MCP lifecycle.
 
-**Tool dispatch** (`server.py`): `call_tool` receives tool name + arguments, dispatches to `RemoteExecutor` methods via `match/case`. Both tools (`sync_and_deploy` and `exec_command`) route to the remote host.
+**Tool dispatch** (`server.py`): `call_tool` receives tool name + arguments, dispatches to `RemoteExecutor` methods via `match/case`. Both tools (`sync` and `exec_command`) route to the remote host.
 
 **`RemoteExecutor`** (`executor.py`): High-level operations layer. Each method:
 1. Validates the command through `sandbox.check_allowed()`.

@@ -1,8 +1,8 @@
 """MCP Server — bridges an MCP client to a remote execution environment.
 
 Provides 2 tools:
-  - sync_and_deploy  : upload files + run deploy script
-  - exec_command     : generic sandboxed remote command
+  - sync          : upload files to remote server
+  - exec_command  : generic sandboxed remote command
 """
 
 import asyncio
@@ -28,14 +28,11 @@ logger = logging.getLogger("remote-executor-mcp")
 
 TOOLS = [
     Tool(
-        name="sync_and_deploy",
+        name="sync",
         description=(
-            "将本地修改的文件同步到远端服务器，可选执行部署命令。\n"
-            "大多数情况下只做文件替换，不需要部署脚本。如：\n"
-            "- 替换静态HTML/配置文件 → 不传 deploy_script，只同步\n"
-            "- 替换 Python/Go 代码并重启服务 → deploy_script 传 'systemctl restart myapp'\n"
-            "- 替换前端资源并构建 → deploy_script 传 'npm run build'\n"
-            "如果不确定要不要部署，先不传 deploy_script，只同步文件。"
+            "将本地文件同步到远端服务器。\n"
+            "文件路径必须为绝对路径，远端路径根据本地项目目录自动计算相对路径。\n"
+            "例如 files: ['/home/user/projects/myapp/src/main.py'] 会同步到远端的 src/main.py。"
         ),
         inputSchema={
             "type": "object",
@@ -43,11 +40,7 @@ TOOLS = [
                 "files": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "要同步的文件列表，使用相对于项目根目录的路径。例如 ['src/main.py', 'tests/test_api.py']",
-                },
-                "deploy_script": {
-                    "type": "string",
-                    "description": "远端部署命令。不传则只替换文件，不做任何部署操作。仅在需要重启服务、重新构建等场景才传。",
+                    "description": "要同步的文件列表，必须使用绝对路径。例如 ['/home/user/projects/myapp/src/main.py', '/home/user/projects/myapp/tests/test_api.py']",
                 },
                 "local_dir": {
                     "type": "string",
@@ -123,10 +116,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     try:
         match name:
-            case "sync_and_deploy":
-                result = await executor.sync_and_deploy(
+            case "sync":
+                result = await executor.sync(
                     files=arguments.get("files", []),
-                    deploy_script=arguments.get("deploy_script"),
                     local_dir=arguments.get("local_dir"),
                     remote_dir=arguments.get("remote_dir"),
                     server=arguments.get("server"),

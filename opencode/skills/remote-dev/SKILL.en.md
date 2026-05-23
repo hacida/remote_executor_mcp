@@ -11,20 +11,20 @@ This skill auto-activates when **both** of the following are true:
    - Modifying code files (.py / .go / .js / .ts / .java / .rs / .rb etc.)
    - Writing or modifying test cases
    - Mentioning "remote", "deploy", "sync", "test", "verify", "logs", "restart"
-   - Invoking the `sync_and_deploy` or `exec_command` tools
+   - Invoking the `sync` or `exec_command` tools
 
 ## Available Tools
 
 | Tool | Purpose |
 |------|---------|
-| `sync_and_deploy` | Upload files to remote + optionally execute a deploy command |
+| `sync` | Upload files to remote server |
 | `exec_command` | Execute a sandboxed general-purpose command on the remote host |
 
 Both tools accept an optional `server` parameter to target a specific server (defaults to the first configured server when omitted).
 
 ## Core Principles
 
-1. **Local-first** — All code changes and test writing happen locally. Sync to remote via `sync_and_deploy`. **Never** edit code directly on the remote.
+1. **Local-first** — All code changes and test writing happen locally. Sync to remote via `sync`. **Never** edit code directly on the remote.
 2. **Auto-discovery first** — When you need log commands, restart commands, or parameters, probe the remote environment via `exec_command` first. Only ask the user when you cannot determine the answer.
 3. **Memory-driven** — User-provided information and auto-discovered parameters must be recorded to memory. Never ask or probe for the same thing twice.
 4. **Minimal change** — Change one logical point at a time, sync only modified files, verify immediately.
@@ -59,22 +59,22 @@ Modify code files **locally**. Principles:
 ### Step 2 — Sync to Remote
 
 ```
-Call sync_and_deploy
-  files: ["your modified files", "your new/modified test files"]
+Call sync
+  files: ["/absolute/path/to/modified/file.py", "/absolute/path/to/test_file.py"]
   server: "prod"                ← optional, uses default server if omitted
 ```
 
 **Rules**:
 - Only send files you actually modified — never sync the entire project
 - Sync code files and corresponding test files together
-- Do **not** pass `deploy_script` at this stage (unless it's a pure static file replacement)
+- All file paths must be **absolute paths** — relative paths are rejected
 
 **Files forbidden to sync**:
 - `.env`, `.secret`, `credentials.*` — files containing secrets/credentials
 - `__pycache__/`, `.pyc` — build artifacts
 - `.git/` — version control directory
 
-### Step 3 — Deploy (optional, only when needed)
+### Step 3 — Deploy / Restart (optional, only when needed)
 
 **When deployment is needed**:
 - Compiled/runtime languages (Python/Go/Java/Rust) with business logic changes → need service restart
@@ -101,6 +101,11 @@ exec_command("docker ps --format '{{.Names}} {{.Status}}'")
 
 # 4. Check pm2 processes (Node.js)
 exec_command("pm2 list 2>/dev/null || echo 'no pm2'")
+```
+
+Once the deploy/restart command is known, run it via `exec_command`:
+```
+exec_command("systemctl restart myapp")
 ```
 
 If exactly one clear match is found, use it directly and record to memory.
@@ -347,11 +352,12 @@ opencode/memory/
 
 ```
 # Verify on staging first
-sync_and_deploy(files=["src/api/user.py"], server="staging")
+sync(files=["/home/user/projects/myapp/src/api/user.py"], server="staging")
 exec_command("pytest tests/test_user.py -v", server="staging")
 
 # Deploy to prod after confirmation
-sync_and_deploy(files=["src/api/user.py"], deploy_script="<deploy command from memory>", server="prod")
+sync(files=["/home/user/projects/myapp/src/api/user.py"], server="prod")
+exec_command("<deploy command from memory>", server="prod")
 exec_command("pytest tests/ -v", server="prod")
 ```
 
@@ -365,9 +371,9 @@ Memory records for different servers must be **stored separately** (annotated wi
 ```
 1. [local] Modify src/api/user.py
 2. [local] Modify/create tests/test_user_api.py
-3. sync_and_deploy(files=["src/api/user.py", "tests/test_user_api.py"], server="prod")
+3. sync(files=["/home/user/projects/myapp/src/api/user.py", "/home/user/projects/myapp/tests/test_user_api.py"], server="prod")
 4. [Memory lookup/auto-discover] → deploy_cmd = "systemctl restart myapi"
-5. sync_and_deploy(files=["src/api/user.py"], deploy_script="systemctl restart myapi", server="prod")
+5. exec_command("systemctl restart myapi", server="prod")
 6. exec_command("pytest tests/test_user_api.py -v", server="prod")
 7. If failed → [Memory lookup/auto-discover] → log_cmd → exec_command("journalctl -u myapi -n 200 --no-pager")
 8. [local] Fix code → return to Step 2
@@ -380,7 +386,7 @@ Memory records for different servers must be **stored separately** (annotated wi
 3. [probe] exec_command("cat pyproject.toml | head -50") → confirms pytest
 4. [probe] exec_command("grep -r 'DATABASE_URL\|DB_URL' tests/conftest.py") → needs --db-url
 5. [Memory lookup] → db_url already recorded → use it
-6. sync_and_deploy(files=["src/feature.py", "tests/test_feature.py"])
+6. sync(files=["/home/user/projects/myapp/src/feature.py", "/home/user/projects/myapp/tests/test_feature.py"])
 7. exec_command("pytest tests/test_feature.py -v --db-url=<value from memory>")
 8. Iterate based on results
 ```
@@ -388,7 +394,7 @@ Memory records for different servers must be **stored separately** (annotated wi
 ### Scenario 3: Static Files/Config Only (no deploy needed)
 ```
 1. [local] Modify docs/api.html
-2. sync_and_deploy(files=["docs/api.html"])             ← no deploy_script
+2. sync(files=["/home/user/projects/myapp/docs/api.html"])
 3. exec_command("head -5 /opt/app/docs/api.html")       ← verify remote file updated
 ```
 

@@ -1,6 +1,6 @@
 [project]
 name = "remote-executor-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "MCP server bridging AI agents (Claude Code, OpenCode, etc.) to remote Linux servers via SSH"
 readme = "README.md"
 license = {text = "MIT"}

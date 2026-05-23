@@ -68,12 +68,8 @@ class CommandResult:
 class SyncResult:
     files_synced: list[str]
     files_failed: list[dict[str, str]]
-    deploy_result: CommandResult | None
     total_bytes: int
     duration_ms: float
 
     def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        if self.deploy_result:
-            d["deploy_result"] = self.deploy_result.to_dict()
-        return d
+        return asdict(self)

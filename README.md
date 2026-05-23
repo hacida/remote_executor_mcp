@@ -26,7 +26,7 @@
 ┌─────────────────┐      MCP (stdio)       ┌──────────────────┐      SSH/SFTP       ┌──────────────────┐
 │   AI Agent      │ ◄──────────────────────►│  remote-executor │ ◄───────────────────►│  Remote Linux    │
 │  (OpenCode/     │                        │  MCP Server      │                      │  Server          │
-│   Claude Code)  │   sync_and_deploy      │  (本机运行)       │   ConnectionPool     │  (目标服务器)     │
+│   Claude Code)  │   sync                 │  (本机运行)       │   ConnectionPool     │  (目标服务器)     │
 │                 │   exec_command         │                  │   Sandbox            │                  │
 │   本机 (可 Windows)                       │  端口: stdio      │   端口: SSH 22       │   必须 Linux      │
 └─────────────────┘                        └──────────────────┘                      └──────────────────┘
@@ -35,7 +35,7 @@
 **核心约束**：
 - AI Agent 和 MCP Server 运行在**本机**（Windows / macOS / Linux 均可）
 - 远端服务器必须是 **Linux**（通过 SSH 连接）
-- 代码修改在**本机**完成，通过 `sync_and_deploy` 同步到远端
+- 代码修改在**本机**完成，通过 `sync` 同步到远端
 - 远端命令执行受**沙箱白名单**控制
 
 ---
@@ -328,7 +328,7 @@ which python
     }
   },
   "permission": {
-    "mcp:remote-executor:sync_and_deploy": "allow",
+    "mcp:remote-executor:sync": "allow",
     "mcp:remote-executor:exec_command": "ask"
   }
 }
@@ -343,7 +343,7 @@ which python
 | `deny` | 禁止执行 |
 
 **建议**：
-- `sync_and_deploy` → `allow`（文件上传相对安全）
+- `sync` → `allow`（文件上传相对安全）
 - `exec_command` → `ask`（远端命令执行应保持审查）
 
 ---
@@ -361,7 +361,7 @@ which python
 如果看到以下 2 个工具，说明配置成功：
 
 ```
-remote-executor:sync_and_deploy
+remote-executor:sync
 remote-executor:exec_command
 ```
 
@@ -413,9 +413,10 @@ Agent 的执行序列：
 2. `exec_command("journalctl -u myapp -n 200 --no-pager")` → 看近期日志
 3. 读取本机 `src/api/login.py` → 分析代码
 4. **在本机**修改 `src/api/login.py` → 修复 bug
-5. `sync_and_deploy(files=["src/api/login.py"], deploy_script="systemctl restart myapp")` → 上传并部署
-6. `exec_command("pytest tests/test_login.py -v", server="prod")` → 跑测试
-7. 如果失败 → 看日志 → 分析 → **本机**修复 → 回到步骤 5
+5. `sync(files=["/home/user/projects/myapp/src/api/login.py"])` → 上传
+6. `exec_command("systemctl restart myapp")` → 部署
+7. `exec_command("pytest tests/test_login.py -v", server="prod")` → 跑测试
+8. 如果失败 → 看日志 → 分析 → **本机**修复 → 回到步骤 5
 
 > **关键**：所有代码修改都在**本机**完成，远端只负责执行。Agent 绝不会在远端直接编辑文件。
 
@@ -423,11 +424,12 @@ Agent 的执行序列：
 
 ```
 # 先在 staging 上测试
-sync_and_deploy(files=["src/api/user.py"], server="staging")
+sync(files=["/home/user/projects/myapp/src/api/user.py"], server="staging")
 exec_command("pytest tests/test_user.py -v", server="staging")
 
 # 确认通过后再上 prod
-sync_and_deploy(files=["src/api/user.py"], deploy_script="systemctl restart myapp", server="prod")
+sync(files=["/home/user/projects/myapp/src/api/user.py"], server="prod")
+exec_command("systemctl restart myapp", server="prod")
 exec_command("pytest tests/test_user.py -v", server="prod")
 ```
 
@@ -435,14 +437,13 @@ exec_command("pytest tests/test_user.py -v", server="prod")
 
 ## 8. 工具参考
 
-### `sync_and_deploy`
+### `sync`
 
-同步本机文件到远端并可选执行部署命令。
+同步本机文件到远端服务器。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `files` | `string[]` | 是 | 要同步的文件，相对于项目根目录 |
-| `deploy_script` | `string` | 否 | 远端部署命令，留空则只同步不部署 |
+| `files` | `string[]` | 是 | 要同步的文件，必须为绝对路径 |
 | `local_dir` | `string` | 否 | 本机项目目录（绝对路径） |
 | `remote_dir` | `string` | 否 | 远端项目目录（绝对路径） |
 | `server` | `string` | 否 | 目标服务器名称，不填使用默认服务器 |
@@ -451,25 +452,18 @@ exec_command("pytest tests/test_user.py -v", server="prod")
 
 ```json
 {
-  "files_synced": ["src/api/user.py", "tests/test_user.py"],
+  "files_synced": ["/home/user/projects/myapp/src/api/user.py"],
   "files_failed": [],
   "total_bytes": 12345,
-  "deploy_result": {
-    "success": true,
-    "exit_code": 0,
-    "stdout": "Restarting myapp... OK",
-    "stderr": "",
-    "duration_ms": 2340
-  },
   "duration_ms": 3450
 }
 ```
 
 **注意**：
-- 文件路径必须相对于项目根目录
+- 文件路径必须为**绝对路径**，相对路径会被拒绝
+- 远端路径根据文件相对于本机项目目录的路径自动计算
 - 远端父目录不存在时会自动创建
-- 使用 SFTP 上传，每次全量传
-- 不传 `deploy_script` 则只上传文件，不执行任何部署操作
+- 使用 SFTP 上传
 - **禁止**同步 `.env`、`credentials.*`、`*.pem` 等包含密钥的文件
 
 ### `exec_command`
@@ -572,13 +566,13 @@ Sandbox ──────────────────────┐
 ```json
 {
   "permission": {
-    "mcp:remote-executor:sync_and_deploy": "allow",
+    "mcp:remote-executor:sync": "allow",
     "mcp:remote-executor:exec_command": "ask"
   }
 }
 ```
 
-建议 `exec_command` 设为 `ask`（每次确认），`sync_and_deploy` 设为 `allow`。
+建议 `exec_command` 设为 `ask`（每次确认），`sync` 设为 `allow`。
 
 ---
 
@@ -587,7 +581,7 @@ Sandbox ──────────────────────┐
 本项目包含一个 AI Skill 文件 `opencode/skills/remote-dev/SKILL.md`，定义了远端开发的完整工作流：
 
 - **触发条件**：检测到 `remote-executor.yaml` 且用户涉及代码修改/测试/部署
-- **本地优先**：所有代码修改在本机完成，通过 `sync_and_deploy` 同步到远端
+- **本地优先**：所有代码修改在本机完成，通过 `sync` 同步到远端
 - **自动发现**：自动探测远端服务、日志、测试框架和参数
 - **Memory 驱动**：用户确认的信息和固定参数自动记录，下次直接使用
 - **测试闭环**：本地生成测试 → 同步 → 远端执行 → 修复迭代
@@ -621,9 +615,9 @@ REMOTE_EXECUTOR_CONFIG=./remote-executor.yaml python -m remote_executor_mcp 2>&1
 # python -m remote_executor_mcp 2>&1
 ```
 
-### Q2: sync_and_deploy 成功但部署没生效
+### Q2: sync 成功但部署没生效
 
-检查 `deploy_script` 是否正确：
+部署/重启命令需通过 `exec_command` 单独执行。检查命令是否正确：
 - `systemctl restart myapp` 需要 sudo → 确认远端用户有 sudo 免密权限，或配置了 `become_user`
 - 部署脚本路径是相对于远端 `project_dir` 的
 
@@ -693,4 +687,4 @@ New-NetFirewallRule -DisplayName "SSH Out" -Direction Outbound -Protocol TCP -Re
 - [ ] **Windows**: YAML 中路径使用正斜杠格式（`D:/WorkSpace/...` 或 Git Bash 风格）
 - [ ] OpenCode 启动后 `/list-tools` 可以看到 2 个 remote-executor 工具
 - [ ] `exec_command "hostname"` 返回远端主机名
-- [ ] `sync_and_deploy` + `exec_command` 端到端走通
+- [ ] `sync` + `exec_command` 端到端走通

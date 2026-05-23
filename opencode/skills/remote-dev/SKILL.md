@@ -11,20 +11,20 @@
    - 修改代码文件（.py / .go / .js / .ts / .java / .rs / .rb 等）
    - 编写或修改测试用例
    - 提到"远端"、"远程"、"部署"、"同步"、"测试"、"验证"、"日志"、"重启"
-   - 调用 `sync_and_deploy` 或 `exec_command` 工具
+   - 调用 `sync` 或 `exec_command` 工具
 
 ## 可用工具
 
 | 工具 | 用途 |
 |------|------|
-| `sync_and_deploy` | 上传文件到远端 + 可选执行部署命令 |
+| `sync` | 上传文件到远端服务器 |
 | `exec_command` | 在远端执行沙箱受控的通用命令 |
 
 每个工具都支持 `server` 参数来指定目标服务器（不传则使用默认服务器）。
 
 ## 核心原则
 
-1. **本地优先** — 所有代码修改和测试编写在本地完成，通过 `sync_and_deploy` 同步到远端。**禁止**直接在远端修改代码。
+1. **本地优先** — 所有代码修改和测试编写在本地完成，通过 `sync` 同步到远端。**禁止**直接在远端修改代码。
 2. **自动发现优先** — 获取日志、重启服务、查找参数时，先通过 `exec_command` 自动探测远端环境。只在无法确定时向用户提问。
 3. **记忆驱动** — 用户提供的信息和自动发现的固定参数必须记录到 memory，下次不再重复询问或探测。
 4. **最小变更** — 每次只改一个逻辑点，只同步修改过的文件，立即验证。
@@ -59,15 +59,15 @@
 ### Step 2 — 同步代码到远端
 
 ```
-调用 sync_and_deploy
-  files: ["你修改的文件路径", "你新增/修改的测试文件路径"]
+调用 sync
+  files: ["/absolute/path/to/modified/file.py", "/absolute/path/to/test_file.py"]
   server: "prod"                ← 可选，不传使用默认服务器
 ```
 
 **规则**：
 - 只传你实际修改过的文件，不要传整个项目
 - 同时同步代码文件和对应的测试文件
-- **不要**在此阶段传 `deploy_script`（除非是纯静态文件替换）
+- 所有文件路径必须为**绝对路径** — 相对路径会被拒绝
 
 **禁止同步的文件**：
 - `.env`、`.secret`、`credentials.*` — 包含密钥/凭证的文件
@@ -101,6 +101,11 @@ exec_command("docker ps --format '{{.Names}} {{.Status}}'")
 
 # 4. 检查 pm2 进程（Node.js）
 exec_command("pm2 list 2>/dev/null || echo 'no pm2'")
+```
+
+确定部署/重启命令后，通过 `exec_command` 执行：
+```
+exec_command("systemctl restart myapp")
 ```
 
 如果只发现一个明显匹配的服务，直接使用并记录到 memory。
@@ -347,11 +352,12 @@ opencode/memory/
 
 ```
 # 先在 staging 验证
-sync_and_deploy(files=["src/api/user.py"], server="staging")
+sync(files=["/home/user/projects/myapp/src/api/user.py"], server="staging")
 exec_command("pytest tests/test_user.py -v", server="staging")
 
 # 确认通过后上 prod
-sync_and_deploy(files=["src/api/user.py"], deploy_script="<memory中记录的deploy命令>", server="prod")
+sync(files=["/home/user/projects/myapp/src/api/user.py"], server="prod")
+exec_command("<memory中记录的deploy命令>", server="prod")
 exec_command("pytest tests/ -v", server="prod")
 ```
 
@@ -365,9 +371,9 @@ exec_command("pytest tests/ -v", server="prod")
 ```
 1. [本地] 修改 src/api/user.py
 2. [本地] 修改/新建 tests/test_user_api.py
-3. sync_and_deploy(files=["src/api/user.py", "tests/test_user_api.py"], server="prod")
+3. sync(files=["/home/user/projects/myapp/src/api/user.py", "/home/user/projects/myapp/tests/test_user_api.py"], server="prod")
 4. [Memory 查询/自动发现] → deploy_cmd = "systemctl restart myapi"
-5. sync_and_deploy(files=["src/api/user.py"], deploy_script="systemctl restart myapi", server="prod")
+5. exec_command("systemctl restart myapi", server="prod")
 6. exec_command("pytest tests/test_user_api.py -v", server="prod")
 7. 失败 → [Memory 查询/自动发现] → log_cmd → exec_command("journalctl -u myapi -n 200 --no-pager")
 8. [本地] 修复代码 → 回到 Step 2
@@ -380,7 +386,7 @@ exec_command("pytest tests/ -v", server="prod")
 3. [探测] exec_command("cat pyproject.toml | head -50") → 确认 pytest
 4. [探测] exec_command("grep -r 'DATABASE_URL\|DB_URL' tests/conftest.py") → 发现需要 --db-url
 5. [Memory 查询] → db_url 已有记录 → 使用
-6. sync_and_deploy(files=["src/feature.py", "tests/test_feature.py"])
+6. sync(files=["/home/user/projects/myapp/src/feature.py", "/home/user/projects/myapp/tests/test_feature.py"])
 7. exec_command("pytest tests/test_feature.py -v --db-url=<memory中的值>")
 8. 根据结果迭代
 ```
@@ -388,7 +394,7 @@ exec_command("pytest tests/ -v", server="prod")
 ### 场景 3：只改静态文件/配置
 ```
 1. [本地] 修改 docs/api.html
-2. sync_and_deploy(files=["docs/api.html"])   ← 不传 deploy_script
+2. sync(files=["/home/user/projects/myapp/docs/api.html"])
 3. exec_command("head -5 /opt/app/docs/api.html")    ← 验证远端已更新
 ```
 
